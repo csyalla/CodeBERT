@@ -68,7 +68,7 @@ def eval_bleu_epoch(args, eval_dataloader, model, tokenizer):
                             use_cache=True,
                             num_beams=args.beam_size,
                             early_stopping=True,
-                            max_length=args.max_target_length)
+                            max_new_tokens=args.max_target_length)
         top_preds = list(preds.cpu().numpy())
         pred_ids.extend(top_preds)
     # [1:] to remove beginning '<msg>'
@@ -83,11 +83,13 @@ def eval_bleu_epoch(args, eval_dataloader, model, tokenizer):
     return bleu
 
 
-def save_model(model, optimizer, scheduler, output_dir, config):
+def save_model(model, optimizer, scheduler, output_dir, config, tokenizer):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     model_to_save = model.module if hasattr(model, "module") else model
     config.save_pretrained(output_dir)
+    ##save tokenizer added
+    tokenizer.save_pretrained(output_dir)
     output_model_file = os.path.join(output_dir, "pytorch_model.bin")
     torch.save(model_to_save.state_dict(), output_model_file)
     output_optimizer_file = os.path.join(output_dir, "optimizer.pt")
@@ -246,7 +248,9 @@ def main(args):
                     _, _, valid_dataloader = next(get_loaders(valid_files, args, tokenizer, pool, eval=True))
                     bleu = eval_bleu_epoch(args, valid_dataloader, model, tokenizer)
                     output_dir = os.path.join(args.output_dir, "checkpoints-last" + "-" + str(bleu))
-                    save_model(model, optimizer, scheduler, output_dir, config)
+                    ##save_model(model, optimizer, scheduler, output_dir, config)
+                    logger.info(f"tokenizer arg added.")
+                    save_model(model, optimizer, scheduler, output_dir, config, tokenizer)
                     logger.info(f"Reach max steps {args.train_steps}.")
                     time.sleep(5)
                     return
@@ -256,7 +260,8 @@ def main(args):
                     _, _, valid_dataloader = next(get_loaders(valid_files, args, tokenizer, pool, eval=True))
                     bleu = eval_bleu_epoch(args, valid_dataloader, model, tokenizer)
                     output_dir = os.path.join(args.output_dir, "checkpoints-" + str(global_step) + "-" + str(bleu))
-                    save_model(model, optimizer, scheduler, output_dir, config)
+                    ##save_model(model, optimizer, scheduler, output_dir, config)
+                    save_model(model, optimizer, scheduler, output_dir, config, tokenizer)
                     logger.info(
                         "Save the {}-step model and optimizer into {}".format(
                             global_step, output_dir
