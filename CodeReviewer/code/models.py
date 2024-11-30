@@ -2,7 +2,7 @@ import os
 import torch.nn as nn
 import torch
 import torch.nn.functional as F
-from torch.nn import CrossEntropyLoss, BCEWithLogitsLoss
+from torch.nn import BCEWithLogitsLoss
 import numpy as np
 from utils import MyTokenizer
 from transformers import (
@@ -20,6 +20,22 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=1, gamma=2, ignore_index=-100):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.ignore_index = ignore_index
+
+    def forward(self, inputs, targets):
+        # Ensure inputs and targets have the correct shape
+        inputs = inputs.view(-1, inputs.size(-1))
+        targets = targets.view(-1)
+
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none', ignore_index=self.ignore_index)
+        pt = torch.exp(-ce_loss)  # prevents nans when probability is 0
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+        return focal_loss.mean()
 
 class ReviewerModel(T5ForConditionalGeneration):
 
@@ -38,29 +54,6 @@ class ReviewerModel(T5ForConditionalGeneration):
     def forward(
         self, *argv, **kwargs
     ):
-        r"""
-        Doc from Huggingface transformers:
-        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
-            Labels for computing the sequence classification/regression loss. Indices should be in :obj:`[-100, 0, ...,
-            config.vocab_size - 1]`. All labels set to ``-100`` are ignored (masked), the loss is only computed for
-            labels in ``[0, ..., config.vocab_size]``
-        Returns:
-        Examples::
-            >>> from transformers import T5Tokenizer, T5ForConditionalGeneration
-            >>> tokenizer = T5Tokenizer.from_pretrained('t5-small')
-            >>> model = T5ForConditionalGeneration.from_pretrained('t5-small')
-            >>> # training
-            >>> input_ids = tokenizer('The <extra_id_0> walks in <extra_id_1> park', return_tensors='pt').input_ids
-            >>> labels = tokenizer('<extra_id_0> cute dog <extra_id_1> the <extra_id_2>', return_tensors='pt').input_ids
-            >>> outputs = model(input_ids=input_ids, labels=labels)
-            >>> loss = outputs.loss
-            >>> logits = outputs.logits
-            >>> # inference
-            >>> input_ids = tokenizer("summarize: studies have shown that owning a dog is good for you", return_tensors="pt").input_ids  # Batch size 1
-            >>> outputs = model.generate(input_ids)
-            >>> print(tokenizer.decode(outputs[0], skip_special_tokens=True))
-            >>> # studies have shown that owning a dog is good for you.
-        """
         if "cls" in kwargs:
             assert (
                 "input_ids" in kwargs and \
@@ -108,8 +101,8 @@ class ReviewerModel(T5ForConditionalGeneration):
         first_hidden = hidden_states[:, 0, :]
         first_hidden = nn.Dropout(0.3)(first_hidden)
         logits = self.cls_head(first_hidden)
-        loss_fct = CrossEntropyLoss()
-        if labels != None:
+        loss_fct = FocalLoss()
+        if labels is not None:
             loss = loss_fct(logits, labels)
             return loss
         return logits
@@ -144,15 +137,13 @@ class ReviewerModel(T5ForConditionalGeneration):
         if self.config.tie_word_embeddings: # this is True default
             sequence_output = sequence_output * (self.model_dim ** -0.5)
         if encoder_loss:
-            # print(self.encoder.get_input_embeddings().weight.shape)
             cls_logits = nn.functional.linear(hidden_states, self.encoder.get_input_embeddings().weight)
-            # cls_logits = self.cls_head(hidden_states)
         lm_logits = self.lm_head(sequence_output)
         if decoder_input_ids is not None:
-            lm_loss_fct = CrossEntropyLoss(ignore_index=0)      # Warning: PAD_ID should be 0
+            lm_loss_fct = FocalLoss(ignore_index=0)      # Warning: PAD_ID should be 0
             loss = lm_loss_fct(lm_logits.view(-1, lm_logits.size(-1)), decoder_input_ids.view(-1))
             if encoder_loss and input_labels is not None:
-                cls_loss_fct = CrossEntropyLoss(ignore_index=-100)
+                cls_loss_fct = FocalLoss(ignore_index=-100)
                 loss += cls_loss_fct(cls_logits.view(-1, cls_logits.size(-1)), input_labels.view(-1))
             return loss
         return cls_logits, lm_logits
@@ -175,7 +166,7 @@ def build_or_load_gen_model(args):
     }
 
     tokenizer.mask_id = tokenizer.get_vocab()["<mask>"]
-    tokenizer.bos_id = tokenizer.get_vocab()["<s>"]
+    tokenizer.bos_id = tokenizer.get_vocab().get("<s>", tokenizer.pad_token_id)  # Handle missing <s> token
     tokenizer.pad_id = tokenizer.get_vocab()["<pad>"]
     tokenizer.eos_id = tokenizer.get_vocab()["</s>"]
     tokenizer.msg_id = tokenizer.get_vocab()["<msg>"]
@@ -204,5 +195,3 @@ def build_or_load_gen_model(args):
         model.to(args.local_rank)
 
     return config, model, tokenizer
-
-
